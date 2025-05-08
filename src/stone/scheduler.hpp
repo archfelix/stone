@@ -128,6 +128,21 @@ namespace stone
         std::function<void(const std::shared_ptr<WorkItem> &)> fn_done;
     };
 
+    class WorkItemBase : public WorkItem
+    {
+    private:
+        /* data */
+    public:
+        WorkItemBase()
+        {
+            this->fn = std::bind(&WorkItemBase::Run, this);
+        }
+
+        ~WorkItemBase() {}
+
+        virtual void Run() = 0;
+    };
+
     template <class F, class... Args>
     inline auto make_task(F &&f, Args &&...args)
         -> std::tuple<std::shared_ptr<WorkItem>,

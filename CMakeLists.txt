@@ -14,5 +14,9 @@ include_directories(src)
 #
 # Packages
 #
+# Basis
 stone_build_package(stone)
-stone_build_package(example)
+stone_build_package(main)
+# other libraries
+stone_build_package(example_pub)
+stone_build_package(example_sub)
