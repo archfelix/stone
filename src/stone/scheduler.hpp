@@ -54,6 +54,7 @@ namespace stone
         {
             ONCE,
             INTERVAL,
+            EVENT,
         };
 
         std::function<void()> fn;
@@ -86,6 +87,17 @@ namespace stone
             };
             this->schedule_type = ScheduleType::INTERVAL;
             this->interval_stop = false;
+        }
+
+        template <class F, class... Args>
+        void bind_event(F &&f, Args &&...args)
+        {
+            auto _fn = std::bind(std::forward<F>(f), std::forward<Args>(args)...);
+            this->fn = [_fn]()
+            {
+                _fn();
+            };
+            this->schedule_type = ScheduleType::EVENT;
         }
 
         void set_priority(std::size_t priority)
@@ -124,23 +136,11 @@ namespace stone
         volatile bool interval_stop = false;
         std::chrono::microseconds interval_us = std::chrono::microseconds(0);
 
+        // used in EVENT
+        std::string event;
+
         // needed by scheduling.
         std::function<void(const std::shared_ptr<WorkItem> &)> fn_done;
-    };
-
-    class WorkItemBase : public WorkItem
-    {
-    private:
-        /* data */
-    public:
-        WorkItemBase()
-        {
-            this->fn = std::bind(&WorkItemBase::Run, this);
-        }
-
-        ~WorkItemBase() {}
-
-        virtual void Run() = 0;
     };
 
     template <class F, class... Args>
@@ -161,12 +161,27 @@ namespace stone
         return task;
     }
 
+    template <class F, class... Args>
+    inline std::shared_ptr<WorkItem> make_event_task(F &&f, Args &&...args)
+    {
+        auto task = std::make_shared<WorkItem>();
+        task->bind_event(f, args...);
+        return task;
+    }
+
     class ThreadPool
     {
     private:
+        class PriorityCompare
+        {
+        public:
+            bool operator()(const std::shared_ptr<WorkItem> &a, const std::shared_ptr<WorkItem> &b)
+            {
+                return a->priority > b->priority;
+            }
+        };
         std::vector<std::thread> _threads;
-        // std::queue<std::shared_ptr<WorkItem>> work_queue;
-        std::multimap<std::size_t, std::shared_ptr<WorkItem>> work_queue;
+        std::priority_queue<std::shared_ptr<WorkItem>, std::vector<std::shared_ptr<WorkItem>>, PriorityCompare> work_queue;
         std::mutex work_queue_mtx;
         std::condition_variable work_queue_cv;
         volatile bool stop = false;
@@ -184,8 +199,8 @@ namespace stone
                     {
                         return;
                     }
-                    item = work_queue.begin()->second;
-                    work_queue.erase(work_queue.begin());
+                    item = work_queue.top();
+                    work_queue.pop();
                 }
                 if (item->fn)
                 {
@@ -234,7 +249,7 @@ namespace stone
         {
             {
                 std::lock_guard<std::mutex> glock(work_queue_mtx);
-                this->work_queue.insert({item->priority, item});
+                this->work_queue.push(item);
             }
             work_queue_cv.notify_one();
         }
@@ -367,6 +382,15 @@ namespace stone
     class Scheduler
     {
     private:
+        class TimePointCompare
+        {
+        public:
+            bool operator()(const std::shared_ptr<WorkItem> &a, const std::shared_ptr<WorkItem> &b)
+            {
+                return a->wakeup_time > b->wakeup_time;
+            }
+        };
+
         ThreadPool *pool;
         std::thread th_schedule;
 
@@ -375,7 +399,10 @@ namespace stone
 
         std::condition_variable timed_items_cv;
         std::mutex timed_items_mtx;
-        std::multimap<std::chrono::steady_clock::time_point, std::shared_ptr<WorkItem>> timed_items;
+        std::priority_queue<std::shared_ptr<WorkItem>, std::vector<std::shared_ptr<WorkItem>>, TimePointCompare> timed_items;
+
+        std::mutex event_items_mtx;
+        std::unordered_map<std::string, std::vector<std::shared_ptr<WorkItem>>> event_items;
 
         volatile bool stop = false;
 
@@ -396,13 +423,19 @@ namespace stone
                 }
             }
 
-            // interval schedule
             if (item->schedule_type == WorkItem::ScheduleType::INTERVAL)
             {
+                // interval schedule
                 item->wakeup_time = timepoint_now() + item->interval_us;
                 std::lock_guard<std::mutex> glock(timed_items_mtx);
-                timed_items.insert({item->wakeup_time, item});
-                timed_items_cv.notify_one();
+                timed_items.push(item);
+                timed_items_cv.notify_all();
+            }
+            else if (item->schedule_type == WorkItem::ScheduleType::EVENT)
+            {
+                // event schedule
+                std::lock_guard<std::mutex> glock(event_items_mtx);
+                event_items[item->event].push_back(item);
             }
         }
 
@@ -423,8 +456,10 @@ namespace stone
             while (true)
             {
                 std::shared_ptr<stone::WorkItem> item = nullptr;
+                timed_items_mtx.lock();
                 if (timed_items.empty())
                 {
+                    timed_items_mtx.unlock();
                     std::unique_lock<std::mutex> ulock(timed_items_mtx);
                     timed_items_cv.wait(ulock, [this]
                                         { return stop || !timed_items.empty(); });
@@ -434,37 +469,48 @@ namespace stone
                     }
                     continue;
                 }
-
-                auto current_tp = timepoint_now();
-                long long microseconds_diff = 0;
+                else
                 {
-                    std::lock_guard<std::mutex> glock(timed_items_mtx);
-                    microseconds_diff = std::chrono::duration_cast<std::chrono::microseconds>(
-                                            timed_items.begin()->first - current_tp)
-                                            .count();
+                    timed_items_mtx.unlock();
                 }
 
-                if (microseconds_diff > 0)
+                timed_items_mtx.lock();
+                auto interval_us = timed_items.top()->interval_us.count();
+                auto min_wakeup_time = timed_items.top()->wakeup_time;
+                auto current_tp = timepoint_now();
+                if (min_wakeup_time > current_tp)
                 {
-                    std::unique_lock<std::mutex> ulock(timed_items_mtx);
-                    timed_items_cv.wait_for(ulock,
-                                            std::chrono::microseconds(microseconds_diff),
-                                            [this]
-                                            { return stop || !timed_items.empty(); });
+                    timed_items_mtx.unlock();
+                    if (interval_us <= 20 * 1000)
+                    {
+                        while (true)
+                        {
+                            if (timepoint_now() >= min_wakeup_time)
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        std::unique_lock<std::mutex> ulock(timed_items_mtx);
+                        timed_items_cv.wait_for(ulock, (min_wakeup_time - timepoint_now()) / 2,
+                                                [this, &min_wakeup_time]
+                                                { return stop || timed_items.top()->wakeup_time < min_wakeup_time; });
+                    }
+
+                    if (stop)
+                    {
+                        return;
+                    }
                     continue;
                 }
                 else
                 {
-                    std::lock_guard<std::mutex> glock(timed_items_mtx);
-                    auto upper = timed_items.upper_bound(current_tp);
-                    for (auto i = timed_items.begin(); i != upper;)
-                    {
-                        if (!i->second->interval_stop)
-                        {
-                            this->pool->push(i->second);
-                        }
-                        i = timed_items.erase(i);
-                    }
+                    auto item = timed_items.top();
+                    timed_items.pop();
+                    this->pool->push(item);
+                    timed_items_mtx.unlock();
                 }
             }
         }
@@ -526,8 +572,8 @@ namespace stone
             item->fn_done = std::bind(&Scheduler::work_done_handler, this, std::placeholders::_1);
             item->wakeup_time = tp;
             std::lock_guard<std::mutex> glock(timed_items_mtx);
-            timed_items.insert({item->wakeup_time, item});
-            timed_items_cv.notify_one();
+            timed_items.push(item);
+            timed_items_cv.notify_all();
             return true;
         }
 
@@ -542,6 +588,30 @@ namespace stone
             item->interval_us = std::chrono::microseconds(interval_us);
             pool->push(item);
             return true;
+        }
+
+        bool scheduleEvent(const std::shared_ptr<WorkItem> &item, const std::string &event)
+        {
+            if (item->schedule_type != WorkItem::ScheduleType::EVENT)
+            {
+                return false;
+            }
+            item->event = event;
+            item->fn_done = std::bind(&Scheduler::work_done_handler, this, std::placeholders::_1);
+            std::lock_guard<std::mutex> glock(event_items_mtx);
+            event_items[event].push_back(item);
+            return true;
+        }
+
+        void emitEvent(const std::string &event)
+        {
+            std::lock_guard<std::mutex> glock(event_items_mtx);
+            auto &items = event_items[event];
+            for (auto i = items.begin(); i != items.end();)
+            {
+                pool->push(*i);
+                i = items.erase(i);
+            }
         }
     };
 
@@ -572,6 +642,16 @@ namespace stone
                                  unsigned long long interval_us)
     {
         return defaultScheduler.scheduleInterval(item, interval_us);
+    }
+
+    inline bool scheduleEvent(const std::shared_ptr<WorkItem> &item, const std::string &event)
+    {
+        return defaultScheduler.scheduleEvent(item, event);
+    }
+
+    inline void emitEvent(const std::string &event)
+    {
+        defaultScheduler.emitEvent(event);
     }
 } // namespace stone
 

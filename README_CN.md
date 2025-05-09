@@ -20,6 +20,7 @@
 - 带依赖的任务调度
 - 时刻任务调度
 - 定频任务调度
+- 事件触发任务调度
 
 
 优势：
@@ -152,5 +153,21 @@ int main(){
 int main(){
     auto task1 = stone::make_interval_task(fn2, 2);
     stone::scheduleInterval(task1, 100_us);
+}
+```
+
+### 事件任务
+创建事件驱动的任务：
+```cpp
+int main(){
+    auto task1 = stone::make_event_task(fn2, 2);
+    stone::scheduleEvent(task1, "event_name");
+}
+```
+
+在别的地方可以通过`emitEvent`来唤醒与这个事件有关的任务。
+```cpp
+int main(){
+    stone::emitEvent("event_name");
 }
 ```

@@ -20,6 +20,7 @@ Features include:
 - Dependency-based task scheduling
 - Moment-based task scheduling
 - Fixed-frequency task scheduling
+- Event Trigger task scheduling
 
 Advantages:
 - Efficient and stable-latency message communication
@@ -148,5 +149,21 @@ Execute at fixed intervals:
 int main(){
     auto task1 = stone::make_interval_task(fn2, 2);
     stone::scheduleInterval(task1, 100_us);
+}
+```
+
+### Event Task
+Create an event task:
+```cpp
+int main(){
+    auto task1 = stone::make_event_task(fn2, 2);
+    stone::scheduleEvent(task1, "event_name");
+}
+```
+
+On the other place, `emitEvent` can be used to wake up the tasks related with the event.
+```cpp
+int main(){
+    stone::emitEvent("event_name");
 }
 ```
