@@ -105,7 +105,7 @@ int main()
 ```cpp
 int main()
 {
-    auto [item, future1] = stone::make_task(fn1, 2);
+    auto [item, future1] = stone::make_once_task(fn1, 2);
     stone::scheduleNow(item);
 }
 ```
@@ -125,9 +125,9 @@ Level[0]:[task1, task2]
 ```cpp
 int main(){
     stone::WorkItemFlow flow(2);
-    auto [task1, future1] = stone::make_task(fn1, 2);
-    auto [task2, future2] = stone::make_task(fn1, 3);
-    auto [task3, future3] = stone::make_task(fn1, 4);
+    auto [task1, future1] = stone::make_once_task(fn1, 2);
+    auto [task2, future2] = stone::make_once_task(fn1, 3);
+    auto [task3, future3] = stone::make_once_task(fn1, 4);
 
     flow.add(0, task1);
     flow.add(1, task2);
@@ -143,7 +143,7 @@ int main(){
 创建在指定时刻执行：
 ```cpp
 int main(){
-    auto [task1, future1] = stone::make_task(fn1, 2);
+    auto [task1, future1] = stone::make_once_task(fn1, 2);
     stone::scheduleAt(task1, stone::timepoint_shift(1_sec));
 }
 ```

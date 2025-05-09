@@ -63,7 +63,7 @@ namespace stone
         ~WorkItem() {}
 
         template <class F, class... Args>
-        auto bind(F &&f, Args &&...args) -> std::future<typename std::result_of<F(Args...)>::type>
+        auto bind_once(F &&f, Args &&...args) -> std::future<typename std::result_of<F(Args...)>::type>
         {
             using return_type = typename std::result_of<F(Args...)>::type;
             auto _fn = std::make_shared<std::packaged_task<return_type()>>(
@@ -144,12 +144,12 @@ namespace stone
     };
 
     template <class F, class... Args>
-    inline auto make_task(F &&f, Args &&...args)
+    inline auto make_once_task(F &&f, Args &&...args)
         -> std::tuple<std::shared_ptr<WorkItem>,
                       std::future<typename std::result_of<F(Args...)>::type>>
     {
         auto task = std::make_shared<WorkItem>();
-        auto future = task->bind(f, args...);
+        auto future = task->bind_once(f, args...);
         return std::make_tuple(std::move(task), std::move(future));
     }
 
